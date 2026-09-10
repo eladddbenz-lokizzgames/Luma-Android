@@ -48,7 +48,7 @@ public class VoiceAssistantService extends Service implements RecognitionListene
 
     private static final String CHANNEL = "luma_voice_channel";
     private static final int NOTIFICATION_ID = 2711;
-    private static final String KEYLESS = "https://keylessai.thryx.workers.dev/v1/chat/completions";
+    private static final String AI_URL = "https://text.pollinations.ai/openai";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
@@ -61,8 +61,7 @@ public class VoiceAssistantService extends Service implements RecognitionListene
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             stopVoice();
             return START_NOT_STICKY;
@@ -77,7 +76,7 @@ public class VoiceAssistantService extends Service implements RecognitionListene
                 recognizer.setRecognitionListener(this);
             }
             showBubble();
-            main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 500);
+            main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 450);
         }
         return START_NOT_STICKY;
     }
@@ -108,7 +107,7 @@ public class VoiceAssistantService extends Service implements RecognitionListene
             recognizer.startListening(i);
             updateBubble("Luma\nListening…");
         } catch (Throwable e) {
-            main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 1200);
+            main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 900);
         }
     }
 
@@ -121,17 +120,16 @@ public class VoiceAssistantService extends Service implements RecognitionListene
         if (spoken == null || spoken.trim().isEmpty()) { startListening(); return; }
         updateBubble("Luma\nThinking…");
         if (looksLikeDeviceCommand(spoken)) {
-            String result = LumaAccessibilityService.executeCommandStatic(spoken);
-            speak(result);
+            speak(LumaAccessibilityService.executeCommandStatic(spoken));
             return;
         }
         network.execute(new Runnable() {
             @Override public void run() {
                 try {
-                    String reply = askFastAI(spoken);
+                    final String reply = askFastAI(spoken);
                     main.post(new Runnable(){ @Override public void run(){ speak(reply); }});
                 } catch (Exception e) {
-                    main.post(new Runnable(){ @Override public void run(){ speak("I couldn't reach the AI service. Please try again."); }});
+                    main.post(new Runnable(){ @Override public void run(){ speak("The AI service did not answer quickly enough. Please try again."); }});
                 }
             }
         });
@@ -142,39 +140,44 @@ public class VoiceAssistantService extends Service implements RecognitionListene
         JSONObject body = new JSONObject();
         body.put("model", "openai-fast");
         body.put("stream", false);
+        body.put("temperature", 0.6);
+        body.put("max_tokens", 700);
         JSONArray messages = new JSONArray();
-        String sys = "You are Luma, a fast mobile voice assistant. Reply naturally and briefly for spoken conversation.";
+        String sys = "You are Luma, a fast mobile voice assistant. Reply naturally, directly, and briefly.";
         if (screen != null && !screen.isEmpty()) sys += " The user explicitly enabled Live Screen. Current screen context: " + screen;
         messages.put(new JSONObject().put("role", "system").put("content", sys));
         messages.put(new JSONObject().put("role", "user").put("content", prompt));
         body.put("messages", messages);
 
-        HttpURLConnection c = (HttpURLConnection)new URL(KEYLESS).openConnection();
+        HttpURLConnection c = (HttpURLConnection)new URL(AI_URL).openConnection();
         c.setRequestMethod("POST");
-        c.setConnectTimeout(12000);
-        c.setReadTimeout(45000);
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(12000);
         c.setDoOutput(true);
         c.setRequestProperty("Content-Type", "application/json");
-        c.setRequestProperty("Authorization", "Bearer not-needed");
         OutputStream out = c.getOutputStream();
-        out.write(body.toString().getBytes(StandardCharsets.UTF_8)); out.close();
+        out.write(body.toString().getBytes(StandardCharsets.UTF_8));
+        out.close();
         int code = c.getResponseCode();
         InputStream in = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream();
         BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-        StringBuilder sb = new StringBuilder(); String line; while ((line = br.readLine()) != null) sb.append(line); br.close(); c.disconnect();
+        StringBuilder sb = new StringBuilder(); String line;
+        while ((line = br.readLine()) != null) sb.append(line);
+        br.close(); c.disconnect();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
         JSONObject j = new JSONObject(sb.toString());
         JSONArray choices = j.optJSONArray("choices");
         if (choices == null || choices.length() == 0) throw new Exception("No reply");
-        JSONObject msg = choices.optJSONObject(0).optJSONObject("message");
+        JSONObject first = choices.optJSONObject(0);
+        JSONObject msg = first == null ? null : first.optJSONObject("message");
         String text = msg == null ? "" : msg.optString("content", "");
-        if (text.isEmpty()) throw new Exception("No reply");
-        return text;
+        if (text.trim().isEmpty()) throw new Exception("No reply");
+        return text.trim();
     }
 
     private void speak(String text) {
         if (!active) return;
-        if (tts == null) { main.postDelayed(new Runnable(){ @Override public void run(){ speak(text); }}, 500); return; }
+        if (tts == null) { main.postDelayed(new Runnable(){ @Override public void run(){ speak(text); }}, 350); return; }
         updateBubble("Luma\nSpeaking…");
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "luma_reply_" + System.currentTimeMillis());
     }
@@ -185,8 +188,8 @@ public class VoiceAssistantService extends Service implements RecognitionListene
             tts.setSpeechRate(1.03f);
             tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                 @Override public void onStart(String utteranceId) {}
-                @Override public void onDone(String utteranceId) { main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 350); }
-                @Override public void onError(String utteranceId) { main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 500); }
+                @Override public void onDone(String utteranceId) { main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 300); }
+                @Override public void onError(String utteranceId) { main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 450); }
             });
         }
     }
@@ -225,7 +228,7 @@ public class VoiceAssistantService extends Service implements RecognitionListene
     @Override public void onRmsChanged(float rmsdB) {}
     @Override public void onBufferReceived(byte[] buffer) {}
     @Override public void onEndOfSpeech() { updateBubble("Luma\nThinking…"); }
-    @Override public void onError(int error) { if (active && !paused) main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 800); }
+    @Override public void onError(int error) { if (active && !paused) main.postDelayed(new Runnable(){ @Override public void run(){ startListening(); }}, 700); }
     @Override public void onResults(Bundle results) {
         ArrayList<String> list = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         handleSpeech(list != null && !list.isEmpty() ? list.get(0) : "");
