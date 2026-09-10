@@ -59,7 +59,7 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                injectUpgradeScript();
+                injectUpgradeScripts();
             }
         });
         setContentView(web);
@@ -84,10 +84,18 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void injectUpgradeScript() {
+    private void injectUpgradeScripts() {
         try {
-            final String js = readAsset("upgrade27.js");
-            web.post(new Runnable() { @Override public void run() { web.evaluateJavascript(js, null); } });
+            final String js27 = readAsset("upgrade27.js");
+            final String js32 = readAsset("upgrade32.js");
+            web.post(new Runnable() {
+                @Override public void run() {
+                    web.evaluateJavascript(js27, null);
+                    web.postDelayed(new Runnable() {
+                        @Override public void run() { web.evaluateJavascript(js32, null); }
+                    }, 120);
+                }
+            });
         } catch (Exception ignored) {}
     }
 
@@ -151,14 +159,15 @@ public class MainActivity extends Activity {
                 .edit().putString(LumaAccessibilityService.KEY_PENDING_COMMAND, command).apply();
         runOnUiThread(new Runnable() {
             @Override public void run() {
-                web.postDelayed(new Runnable() {
-                    @Override public void run() {
-                        if (!LumaAccessibilityService.isRunning()) startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                    }
-                }, 450);
+                if (web != null) web.evaluateJavascript("window.openDeviceControlWizard&&window.openDeviceControlWizard()", null);
             }
         });
-        return "Starting Device Control. If Android opens Accessibility settings, enable Luma once; after that this command will continue automatically.";
+        return "Device Control needs Android's one-time Accessibility approval. I saved your command; complete the two setup steps and then try it again.";
+    }
+
+    private void openLumaAppInfo() {
+        Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()));
+        startActivity(i);
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
@@ -215,6 +224,15 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void notifyWebControlState() {
+        if (web == null) return;
+        web.post(new Runnable() {
+            @Override public void run() {
+                web.evaluateJavascript("window.onNativeControlStateChanged&&window.onNativeControlStateChanged(" + LumaAccessibilityService.isRunning() + ")", null);
+            }
+        });
+    }
+
     public class LumaNativeBridge {
         @JavascriptInterface public void startChat(final String requestId, final String messagesJson) {
             aiExecutor.execute(new Runnable() {
@@ -257,10 +275,18 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public boolean isDeviceControlEnabled() { return LumaAccessibilityService.isRunning(); }
         @JavascriptInterface public String runOrEnableDeviceTask(String command) { return MainActivity.this.executeOrEnableDeviceTask(command); }
+        @JavascriptInterface public void openLumaAppInfo() {
+            runOnUiThread(new Runnable(){ @Override public void run(){ MainActivity.this.openLumaAppInfo(); }});
+        }
         @JavascriptInterface public void openDeviceControlSettings() {
             ensureAccessibilityComponentEnabled();
             runOnUiThread(new Runnable(){ @Override public void run(){ startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); }});
         }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        notifyWebControlState();
     }
 
     @Override public void onBackPressed() {
