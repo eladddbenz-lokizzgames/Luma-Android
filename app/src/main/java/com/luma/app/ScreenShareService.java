@@ -25,6 +25,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.Base64;
 import android.util.DisplayMetrics;
@@ -65,17 +66,20 @@ public class ScreenShareService extends Service {
     public static final String KEY_CONTEXT = "context";
     private static final String KEY_OCR = "ocr_context";
     private static final String KEY_VISION = "vision_context";
+    private static final long OCR_SCAN_INTERVAL_MS = 100L;
+    private static final long VISION_REFRESH_MS = 9000L;
 
     private static final String CHANNEL_ID = "luma_live_screen";
     private static final int NOTIFICATION_ID = 2601;
     private static volatile List<OcrTarget> latestTargets = Collections.emptyList();
+    private static volatile ScreenShareService instance;
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
     private HandlerThread imageThread;
     private Handler imageHandler;
-    private final Handler main = new Handler();
+    private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean ocrBusy = new AtomicBoolean(false);
     private final AtomicBoolean visionBusy = new AtomicBoolean(false);
@@ -95,6 +99,7 @@ public class ScreenShareService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        instance = this;
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
     }
 
@@ -118,32 +123,66 @@ public class ScreenShareService extends Service {
         return START_NOT_STICKY;
     }
 
+    public static boolean isRunning() { return instance != null; }
+
     public static String getCombinedContext(Context context) {
         SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String saved = p.getString(KEY_CONTEXT, "");
         String accessibility = LumaAccessibilityService.getVisibleTextSnapshot();
         if (accessibility == null || accessibility.trim().isEmpty()) return saved == null ? "" : saved;
-        String out = (saved == null ? "" : saved.trim());
+        String out = saved == null ? "" : saved.trim();
         if (!out.isEmpty()) out += "\n";
         out += "Accessible screen text: " + accessibility.trim();
-        return out.length() > 2600 ? out.substring(0, 2600) : out;
+        return out.length() > 2800 ? out.substring(0, 2800) : out;
     }
 
     public static boolean tapRecognizedText(String target) {
-        String needle = normalize(target);
+        String needle = normalizeTarget(target);
         if (needle.isEmpty()) return false;
         OcrTarget best = null;
+        int bestScore = 0;
         for (OcrTarget item : latestTargets) {
             String candidate = normalize(item.text);
-            if (candidate.equals(needle)) { best = item; break; }
-            if ((candidate.contains(needle) || needle.contains(candidate)) && (best == null || candidate.length() < normalize(best.text).length())) best = item;
+            if (candidate.isEmpty()) continue;
+            int score = matchScore(needle, candidate);
+            if (score > bestScore) {
+                bestScore = score;
+                best = item;
+            }
+            if (score >= 100) break;
         }
-        return best != null && LumaAccessibilityService.tapAtStatic(best.x, best.y);
+        if (best == null || bestScore < 72) return false;
+        return LumaAccessibilityService.animateTapAtStatic(best.x, best.y);
+    }
+
+    private static int matchScore(String needle, String candidate) {
+        if (candidate.equals(needle)) return 100;
+        if (candidate.startsWith(needle) || needle.startsWith(candidate)) return 92;
+        if (candidate.contains(needle) || needle.contains(candidate)) return 86;
+        String[] wanted = needle.split(" ");
+        String[] got = candidate.split(" ");
+        int hits = 0;
+        for (String w : wanted) {
+            if (w.length() < 2) continue;
+            for (String g : got) {
+                if (g.equals(w) || (w.length() >= 4 && (g.startsWith(w) || w.startsWith(g)))) { hits++; break; }
+            }
+        }
+        if (wanted.length > 1 && hits == wanted.length) return 80;
+        return 0;
+    }
+
+    private static String normalizeTarget(String s) {
+        String n = normalize(s);
+        n = n.replaceFirst("^(the|a|an) ", "");
+        n = n.replaceFirst("^(button|icon) ", "");
+        n = n.replaceFirst(" (button|icon)$", "");
+        return n.trim();
     }
 
     private static String normalize(String s) {
         if (s == null) return "";
-        return s.toLowerCase(Locale.US).replaceAll("[^a-z0-9א-ת]+", " ").trim();
+        return s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9א-ת]+", " ").trim();
     }
 
     private void startInForeground() {
@@ -162,7 +201,7 @@ public class ScreenShareService extends Service {
         Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
         b.setSmallIcon(R.drawable.ic_luma)
                 .setContentTitle("Luma Live Screen is active")
-                .setContentText("Use the floating bar or tap STOP")
+                .setContentText("Local screen scanner active • use floating bar or STOP")
                 .setOngoing(true)
                 .setContentIntent(openPi)
                 .addAction(new Notification.Action.Builder(R.drawable.ic_luma, "STOP", stopPi).build());
@@ -187,7 +226,7 @@ public class ScreenShareService extends Service {
         final int height = metrics.heightPixels;
         final int density = metrics.densityDpi;
 
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
+        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
         imageThread = new HandlerThread("LumaScreenFrames");
         imageThread.start();
         imageHandler = new Handler(imageThread.getLooper());
@@ -205,7 +244,7 @@ public class ScreenShareService extends Service {
             image = reader.acquireLatestImage();
             if (image == null) return;
             long now = System.currentTimeMillis();
-            if (now - lastOcrAt < 850 || ocrBusy.get()) return;
+            if (now - lastOcrAt < OCR_SCAN_INTERVAL_MS || ocrBusy.get()) return;
             lastOcrAt = now;
 
             Image.Plane plane = image.getPlanes()[0];
@@ -218,12 +257,12 @@ public class ScreenShareService extends Service {
             Bitmap cropped = Bitmap.createBitmap(full, 0, 0, screenWidth, screenHeight);
             if (cropped != full) full.recycle();
 
-            int outW = Math.min(720, screenWidth);
+            int outW = Math.min(560, screenWidth);
             int outH = Math.max(1, Math.round(screenHeight * (outW / (float) screenWidth)));
             Bitmap scaled = Bitmap.createScaledBitmap(cropped, outW, outH, true);
             if (scaled != cropped) cropped.recycle();
 
-            if (AiProvider.hasAnyKey(this) && now - lastVisionAt >= 9000 && visionBusy.compareAndSet(false, true)) {
+            if (AiProvider.hasAnyKey(this) && now - lastVisionAt >= VISION_REFRESH_MS && visionBusy.compareAndSet(false, true)) {
                 lastVisionAt = now;
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 scaled.compress(Bitmap.CompressFormat.WEBP, 58, bos);
@@ -257,7 +296,15 @@ public class ScreenShareService extends Service {
                         ArrayList<OcrTarget> targets = new ArrayList<>();
                         StringBuilder visible = new StringBuilder();
                         for (Text.TextBlock block : result.getTextBlocks()) {
+                            Rect blockRect = block.getBoundingBox();
+                            if (blockRect != null && block.getText() != null && !block.getText().trim().isEmpty()) {
+                                targets.add(new OcrTarget(block.getText().trim(), blockRect.centerX() * scaleX, blockRect.centerY() * scaleY));
+                            }
                             for (Text.Line line : block.getLines()) {
+                                Rect lineRect = line.getBoundingBox();
+                                if (lineRect != null && line.getText() != null && !line.getText().trim().isEmpty()) {
+                                    targets.add(new OcrTarget(line.getText().trim(), lineRect.centerX() * scaleX, lineRect.centerY() * scaleY));
+                                }
                                 for (Text.Element element : line.getElements()) {
                                     String t = element.getText();
                                     Rect r = element.getBoundingBox();
@@ -265,12 +312,15 @@ public class ScreenShareService extends Service {
                                     float x = r.centerX() * scaleX;
                                     float y = r.centerY() * scaleY;
                                     targets.add(new OcrTarget(t.trim(), x, y));
-                                    if (visible.length() < 1800) visible.append(t.trim()).append(" | ");
+                                    if (visible.length() < 1900) visible.append(t.trim()).append(" | ");
                                 }
                             }
                         }
                         latestTargets = Collections.unmodifiableList(targets);
-                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_OCR, visible.toString()).apply();
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                                .putString(KEY_OCR, visible.toString())
+                                .putLong("ocr_time", System.currentTimeMillis())
+                                .apply();
                         updateCombinedContext();
                         bitmap.recycle();
                         ocrBusy.set(false);
@@ -292,7 +342,7 @@ public class ScreenShareService extends Service {
         if (vision != null && !vision.trim().isEmpty()) out.append("Visual screen: ").append(vision.trim()).append('\n');
         if (ocr != null && !ocr.trim().isEmpty()) out.append("Screen text: ").append(ocr.trim());
         String combined = out.toString();
-        if (combined.length() > 2400) combined = combined.substring(0, 2400);
+        if (combined.length() > 2600) combined = combined.substring(0, 2600);
         p.edit().putString(KEY_CONTEXT, combined).putLong("context_time", System.currentTimeMillis()).apply();
     }
 
@@ -310,7 +360,7 @@ public class ScreenShareService extends Service {
             panel.setElevation(dp(14));
 
             overlayStatus = new TextView(this);
-            overlayStatus.setText("Luma Live • type a message or device command");
+            overlayStatus.setText("Luma Live • 10×/sec local screen scan • type a message or command");
             overlayStatus.setTextColor(Color.rgb(61, 55, 84));
             overlayStatus.setTextSize(12);
             overlayStatus.setMaxLines(3);
@@ -324,15 +374,14 @@ public class ScreenShareService extends Service {
             final EditText input = new EditText(this);
             input.setSingleLine(false);
             input.setMaxLines(3);
-            input.setHint("Ask Luma or give a command…");
+            input.setHint("Ask Luma or say: click Brawlers…");
             input.setTextSize(14);
             input.setPadding(dp(12), dp(7), dp(12), dp(7));
             GradientDrawable inputBg = new GradientDrawable();
             inputBg.setColor(Color.WHITE);
             inputBg.setCornerRadius(dp(14));
             input.setBackground(inputBg);
-            LinearLayout.LayoutParams inputLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            row.addView(input, inputLp);
+            row.addView(input, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
             Button send = makeButton("SEND", Color.rgb(105, 76, 255));
             LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
@@ -398,7 +447,7 @@ public class ScreenShareService extends Service {
                     String reply = AiProvider.quickChat(ScreenShareService.this, q, getCombinedContext(ScreenShareService.this));
                     setOverlayStatus("Luma: " + reply);
                 } catch (Exception e) {
-                    if ("SETUP_REQUIRED".equals(e.getMessage())) setOverlayStatus("Open Luma and tap AI Setup once to add a free Groq API key.");
+                    if ("SETUP_REQUIRED".equals(e.getMessage())) setOverlayStatus("Open Luma and tap AI Setup once to add a Groq API key.");
                     else setOverlayStatus("AI error: " + (e.getMessage() == null ? "request failed" : e.getMessage()));
                 }
             }
@@ -406,9 +455,10 @@ public class ScreenShareService extends Service {
     }
 
     private boolean looksLikeDeviceCommand(String q) {
-        String s = q == null ? "" : q.toLowerCase(Locale.US);
+        String s = q == null ? "" : q.toLowerCase(Locale.ROOT);
         return s.contains("open ") || s.contains("launch ") || s.contains("click ") || s.contains("tap ") ||
-                s.contains("press ") || s.trim().equals("back") || s.trim().equals("home") || s.contains("go back") || s.contains("go home");
+                s.contains("press ") || s.trim().equals("back") || s.trim().equals("home") || s.contains("go back") || s.contains("go home") ||
+                s.contains("לחץ ") || s.contains("תלחץ ") || s.contains("פתח ") || s.contains("חזור");
     }
 
     private String runOrEnableDeviceTask(String q) {
@@ -466,6 +516,7 @@ public class ScreenShareService extends Service {
     }
 
     @Override public void onDestroy() {
+        if (instance == this) instance = null;
         try { if (recognizer != null) recognizer.close(); } catch (Throwable ignored) {}
         stopCaptureOnly();
         networkExecutor.shutdownNow();
