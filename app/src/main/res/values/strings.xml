@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Luma</string>
+    <string name="accessibility_description">Allows Luma, when you explicitly enable Device Control, to inspect accessible controls and perform taps, Back, Home, and app-opening actions you request.</string>
+</resources>
