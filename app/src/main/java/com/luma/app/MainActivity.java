@@ -3,12 +3,12 @@ package com.luma.app;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.media.projection.MediaProjectionManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -25,9 +25,8 @@ import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
     private static final int REQ_CAPTURE = 4421;
-    private static final int REQ_SCREEN_OVERLAY = 4422;
+    private static final int REQ_SCREEN_NOTIFICATIONS = 4423;
     private static final int REQ_VOICE_PERMS = 4424;
-    private static final int REQ_VOICE_OVERLAY = 4425;
 
     private WebView web;
     private MediaProjectionManager projectionManager;
@@ -89,29 +88,23 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    // No permission is requested during app startup.
+    // Live Screen asks only when the user taps Live Screen.
     private void beginScreenShareFlow() {
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
-            Intent overlay = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
-            startActivityForResult(overlay, REQ_SCREEN_OVERLAY);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_SCREEN_NOTIFICATIONS);
             return;
         }
         requestProjectionPermission();
     }
 
     private void requestProjectionPermission() {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4423);
-        }
         Intent captureIntent = projectionManager.createScreenCaptureIntent();
         startActivityForResult(captureIntent, REQ_CAPTURE);
     }
 
+    // Voice asks for microphone/notification permission only after the user taps Voice.
     private void beginVoiceFlow() {
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
-            Intent overlay = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
-            startActivityForResult(overlay, REQ_VOICE_OVERLAY);
-            return;
-        }
         requestVoicePermissions();
     }
 
@@ -140,26 +133,30 @@ public class MainActivity extends Activity {
         notifyWebVoiceState(false);
     }
 
+    private void enableAccessibilityComponentAndOpenSettings() {
+        ComponentName component = new ComponentName(this, LumaAccessibilityService.class);
+        getPackageManager().setComponentEnabledSetting(
+                component,
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                PackageManager.DONT_KILL_APP
+        );
+        startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_VOICE_PERMS) {
-            boolean micGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+            boolean micGranted = Build.VERSION.SDK_INT < 23 || checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
             if (micGranted) startVoiceService();
+        } else if (requestCode == REQ_SCREEN_NOTIFICATIONS) {
+            requestProjectionPermission();
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_SCREEN_OVERLAY) {
-            requestProjectionPermission();
-            return;
-        }
-        if (requestCode == REQ_VOICE_OVERLAY) {
-            requestVoicePermissions();
-            return;
-        }
         if (requestCode == REQ_CAPTURE) {
             if (resultCode == RESULT_OK && data != null) {
                 Intent service = new Intent(this, ScreenShareService.class);
@@ -215,7 +212,7 @@ public class MainActivity extends Activity {
             return getSharedPreferences(VoiceAssistantService.PREFS, MODE_PRIVATE).getBoolean(VoiceAssistantService.KEY_ACTIVE, false);
         }
         @JavascriptInterface public void openDeviceControlSettings() {
-            runOnUiThread(new Runnable(){ @Override public void run(){ startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); }});
+            runOnUiThread(new Runnable(){ @Override public void run(){ enableAccessibilityComponentAndOpenSettings(); }});
         }
         @JavascriptInterface public boolean isDeviceControlEnabled() { return LumaAccessibilityService.isRunning(); }
         @JavascriptInterface public String runDeviceTask(String command) { return LumaAccessibilityService.executeCommandStatic(command); }
