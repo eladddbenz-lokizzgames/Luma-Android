@@ -88,11 +88,17 @@ public class MainActivity extends Activity {
         try {
             final String js27 = readAsset("upgrade27.js");
             final String js32 = readAsset("upgrade32.js");
+            final String js34 = readAsset("upgrade34.js");
             web.post(new Runnable() {
                 @Override public void run() {
                     web.evaluateJavascript(js27, null);
                     web.postDelayed(new Runnable() {
-                        @Override public void run() { web.evaluateJavascript(js32, null); }
+                        @Override public void run() {
+                            web.evaluateJavascript(js32, null);
+                            web.postDelayed(new Runnable() {
+                                @Override public void run() { web.evaluateJavascript(js34, null); }
+                            }, 120);
+                        }
                     }, 120);
                 }
             });
@@ -162,7 +168,7 @@ public class MainActivity extends Activity {
                 if (web != null) web.evaluateJavascript("window.openDeviceControlWizard&&window.openDeviceControlWizard()", null);
             }
         });
-        return "Device Control needs Android's one-time Accessibility approval. I saved your command; complete the two setup steps and then try it again.";
+        return "Device Control needs Android's one-time Accessibility approval. I saved your command; complete setup and try it again.";
     }
 
     private void openLumaAppInfo() {
@@ -268,6 +274,7 @@ public class MainActivity extends Activity {
             return p.getBoolean(ScreenShareService.KEY_ACTIVE, false);
         }
         @JavascriptInterface public String getScreenContext() { return ScreenShareService.getCombinedContext(MainActivity.this); }
+        @JavascriptInterface public int getScreenTrackerFps() { return ScreenShareService.getRawFps(); }
         @JavascriptInterface public void startVoiceMode() { runOnUiThread(new Runnable(){ @Override public void run(){ beginVoiceFlow(); }}); }
         @JavascriptInterface public void stopVoiceMode() { runOnUiThread(new Runnable(){ @Override public void run(){ stopVoiceService(); }}); }
         @JavascriptInterface public boolean isVoiceActive() {
@@ -275,6 +282,13 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public boolean isDeviceControlEnabled() { return LumaAccessibilityService.isRunning(); }
         @JavascriptInterface public String runOrEnableDeviceTask(String command) { return MainActivity.this.executeOrEnableDeviceTask(command); }
+        @JavascriptInterface public String getAgentStatus() { return LumaAccessibilityService.getAgentStatusStatic(); }
+        @JavascriptInterface public void pauseAgent() { LumaAccessibilityService.pauseAgentStatic(); }
+        @JavascriptInterface public void resumeAgent() { LumaAccessibilityService.resumeAgentStatic(); }
+        @JavascriptInterface public void stopAgent() { LumaAccessibilityService.stopAgentStatic(); }
+        @JavascriptInterface public void setSuggestOnly(boolean enabled) { LumaAccessibilityService.setSuggestOnlyStatic(enabled); }
+        @JavascriptInterface public boolean isSuggestOnly() { return LumaAccessibilityService.isSuggestOnlyStatic(); }
+        @JavascriptInterface public String getActionLog() { return LumaAccessibilityService.getActionLogStatic(); }
         @JavascriptInterface public void openLumaAppInfo() {
             runOnUiThread(new Runnable(){ @Override public void run(){ MainActivity.this.openLumaAppInfo(); }});
         }

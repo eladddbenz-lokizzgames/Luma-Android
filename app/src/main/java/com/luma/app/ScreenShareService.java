@@ -64,15 +64,17 @@ public class ScreenShareService extends Service {
     public static final String PREFS = "luma_screen_share";
     public static final String KEY_ACTIVE = "active";
     public static final String KEY_CONTEXT = "context";
+
     private static final String KEY_OCR = "ocr_context";
     private static final String KEY_VISION = "vision_context";
     private static final long OCR_SCAN_INTERVAL_MS = 100L;
     private static final long VISION_REFRESH_MS = 9000L;
-
     private static final String CHANNEL_ID = "luma_live_screen";
     private static final int NOTIFICATION_ID = 2601;
+
     private static volatile List<OcrTarget> latestTargets = Collections.emptyList();
     private static volatile ScreenShareService instance;
+    private static volatile int rawFps = 0;
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
@@ -85,9 +87,12 @@ public class ScreenShareService extends Service {
     private final AtomicBoolean visionBusy = new AtomicBoolean(false);
     private long lastOcrAt = 0L;
     private long lastVisionAt = 0L;
+    private long fpsWindowStart = 0L;
+    private int fpsFrameCount = 0;
     private WindowManager windowManager;
     private View overlayView;
     private TextView overlayStatus;
+    private TextView overlayAgentState;
     private TextRecognizer recognizer;
 
     private static class OcrTarget {
@@ -105,8 +110,7 @@ public class ScreenShareService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
         if (ACTION_STOP.equals(intent.getAction())) {
             stopSharing();
@@ -124,35 +128,44 @@ public class ScreenShareService extends Service {
     }
 
     public static boolean isRunning() { return instance != null; }
+    public static int getRawFps() { return rawFps; }
 
     public static String getCombinedContext(Context context) {
         SharedPreferences p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String saved = p.getString(KEY_CONTEXT, "");
         String accessibility = LumaAccessibilityService.getVisibleTextSnapshot();
-        if (accessibility == null || accessibility.trim().isEmpty()) return saved == null ? "" : saved;
         String out = saved == null ? "" : saved.trim();
+        if (accessibility != null && !accessibility.trim().isEmpty()) {
+            if (!out.isEmpty()) out += "\n";
+            out += "Accessible screen text: " + accessibility.trim();
+        }
         if (!out.isEmpty()) out += "\n";
-        out += "Accessible screen text: " + accessibility.trim();
-        return out.length() > 2800 ? out.substring(0, 2800) : out;
+        out += "Local raw screen tracker: " + rawFps + " FPS; semantic OCR: up to 10 scans/sec.";
+        return out.length() > 3000 ? out.substring(0, 3000) : out;
+    }
+
+    public static boolean hasRecognizedText(String target) {
+        return findBestTarget(target, 72) != null;
     }
 
     public static boolean tapRecognizedText(String target) {
+        OcrTarget best = findBestTarget(target, 72);
+        return best != null && LumaAccessibilityService.animateTapAtStatic(best.x, best.y);
+    }
+
+    private static OcrTarget findBestTarget(String target, int minScore) {
         String needle = normalizeTarget(target);
-        if (needle.isEmpty()) return false;
+        if (needle.isEmpty()) return null;
         OcrTarget best = null;
         int bestScore = 0;
         for (OcrTarget item : latestTargets) {
             String candidate = normalize(item.text);
             if (candidate.isEmpty()) continue;
             int score = matchScore(needle, candidate);
-            if (score > bestScore) {
-                bestScore = score;
-                best = item;
-            }
+            if (score > bestScore) { bestScore = score; best = item; }
             if (score >= 100) break;
         }
-        if (best == null || bestScore < 72) return false;
-        return LumaAccessibilityService.animateTapAtStatic(best.x, best.y);
+        return bestScore >= minScore ? best : null;
     }
 
     private static int matchScore(String needle, String candidate) {
@@ -177,6 +190,7 @@ public class ScreenShareService extends Service {
         n = n.replaceFirst("^(the|a|an) ", "");
         n = n.replaceFirst("^(button|icon) ", "");
         n = n.replaceFirst(" (button|icon)$", "");
+        n = n.replaceFirst("^(הכפתור|כפתור) ", "");
         return n.trim();
     }
 
@@ -197,17 +211,17 @@ public class ScreenShareService extends Service {
         PendingIntent stopPi = PendingIntent.getService(this, 73, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent openPi = PendingIntent.getActivity(this, 74, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
         Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
         b.setSmallIcon(R.drawable.ic_luma)
                 .setContentTitle("Luma Live Screen is active")
-                .setContentText("Local screen scanner active • use floating bar or STOP")
+                .setContentText("Fast local tracking • floating controls available")
                 .setOngoing(true)
                 .setContentIntent(openPi)
                 .addAction(new Notification.Action.Builder(R.drawable.ic_luma, "STOP", stopPi).build());
         startForeground(NOTIFICATION_ID, b.build());
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_ACTIVE, true).apply();
         showOverlayPanel();
+        refreshOverlayAgentState();
     }
 
     private void startProjection(int resultCode, Intent data) {
@@ -230,6 +244,8 @@ public class ScreenShareService extends Service {
         imageThread = new HandlerThread("LumaScreenFrames");
         imageThread.start();
         imageHandler = new Handler(imageThread.getLooper());
+        fpsWindowStart = System.currentTimeMillis();
+        fpsFrameCount = 0;
         imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
             @Override public void onImageAvailable(ImageReader reader) { processLatestFrame(reader, width, height); }
         }, imageHandler);
@@ -244,6 +260,16 @@ public class ScreenShareService extends Service {
             image = reader.acquireLatestImage();
             if (image == null) return;
             long now = System.currentTimeMillis();
+            fpsFrameCount++;
+            if (fpsWindowStart == 0L) fpsWindowStart = now;
+            long elapsed = now - fpsWindowStart;
+            if (elapsed >= 1000L) {
+                rawFps = Math.max(0, Math.round(fpsFrameCount * 1000f / elapsed));
+                fpsFrameCount = 0;
+                fpsWindowStart = now;
+                refreshOverlayAgentState();
+            }
+
             if (now - lastOcrAt < OCR_SCAN_INTERVAL_MS || ocrBusy.get()) return;
             lastOcrAt = now;
 
@@ -312,7 +338,7 @@ public class ScreenShareService extends Service {
                                     float x = r.centerX() * scaleX;
                                     float y = r.centerY() * scaleY;
                                     targets.add(new OcrTarget(t.trim(), x, y));
-                                    if (visible.length() < 1900) visible.append(t.trim()).append(" | ");
+                                    if (visible.length() < 2000) visible.append(t.trim()).append(" | ");
                                 }
                             }
                         }
@@ -342,7 +368,7 @@ public class ScreenShareService extends Service {
         if (vision != null && !vision.trim().isEmpty()) out.append("Visual screen: ").append(vision.trim()).append('\n');
         if (ocr != null && !ocr.trim().isEmpty()) out.append("Screen text: ").append(ocr.trim());
         String combined = out.toString();
-        if (combined.length() > 2600) combined = combined.substring(0, 2600);
+        if (combined.length() > 2700) combined = combined.substring(0, 2700);
         p.edit().putString(KEY_CONTEXT, combined).putLong("context_time", System.currentTimeMillis()).apply();
     }
 
@@ -352,15 +378,21 @@ public class ScreenShareService extends Service {
             windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
             final LinearLayout panel = new LinearLayout(this);
             panel.setOrientation(LinearLayout.VERTICAL);
-            panel.setPadding(dp(12), dp(10), dp(12), dp(10));
+            panel.setPadding(dp(12), dp(9), dp(12), dp(9));
             GradientDrawable panelBg = new GradientDrawable();
-            panelBg.setColor(Color.argb(245, 249, 248, 255));
+            panelBg.setColor(Color.argb(246, 249, 248, 255));
             panelBg.setCornerRadius(dp(20));
             panel.setBackground(panelBg);
             panel.setElevation(dp(14));
 
+            overlayAgentState = new TextView(this);
+            overlayAgentState.setText("Luma Agent • starting…");
+            overlayAgentState.setTextColor(Color.rgb(72, 63, 105));
+            overlayAgentState.setTextSize(11);
+            panel.addView(overlayAgentState, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
             overlayStatus = new TextView(this);
-            overlayStatus.setText("Luma Live • 10×/sec local screen scan • type a message or command");
+            overlayStatus.setText("Ask Luma or enter a device command");
             overlayStatus.setTextColor(Color.rgb(61, 55, 84));
             overlayStatus.setTextSize(12);
             overlayStatus.setMaxLines(3);
@@ -374,7 +406,7 @@ public class ScreenShareService extends Service {
             final EditText input = new EditText(this);
             input.setSingleLine(false);
             input.setMaxLines(3);
-            input.setHint("Ask Luma or say: click Brawlers…");
+            input.setHint("Ask or command…");
             input.setTextSize(14);
             input.setPadding(dp(12), dp(7), dp(12), dp(7));
             GradientDrawable inputBg = new GradientDrawable();
@@ -384,13 +416,18 @@ public class ScreenShareService extends Service {
             row.addView(input, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
             Button send = makeButton("SEND", Color.rgb(105, 76, 255));
-            LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
-            btnLp.setMargins(dp(7), 0, 0, 0);
+            LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
+            btnLp.setMargins(dp(6), 0, 0, 0);
             row.addView(send, btnLp);
 
+            Button pause = makeButton("PAUSE", Color.rgb(71, 120, 210));
+            LinearLayout.LayoutParams pauseLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
+            pauseLp.setMargins(dp(5), 0, 0, 0);
+            row.addView(pause, pauseLp);
+
             Button stop = makeButton("STOP", Color.rgb(220, 52, 90));
-            LinearLayout.LayoutParams stopLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46));
-            stopLp.setMargins(dp(6), 0, 0, 0);
+            LinearLayout.LayoutParams stopLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44));
+            stopLp.setMargins(dp(5), 0, 0, 0);
             row.addView(stop, stopLp);
             panel.addView(row);
 
@@ -403,8 +440,19 @@ public class ScreenShareService extends Service {
                     handleOverlayMessage(q);
                 }
             });
+            pause.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    String status = LumaAccessibilityService.getAgentStatusStatic();
+                    if (status.startsWith("Paused")) LumaAccessibilityService.resumeAgentStatic();
+                    else LumaAccessibilityService.pauseAgentStatic();
+                    refreshOverlayAgentState();
+                }
+            });
             stop.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) { stopSharing(); }
+                @Override public void onClick(View v) {
+                    LumaAccessibilityService.stopAgentStatic();
+                    stopSharing();
+                }
             });
 
             int type = Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE;
@@ -426,7 +474,7 @@ public class ScreenShareService extends Service {
         Button b = new Button(this);
         b.setText(text);
         b.setTextColor(Color.WHITE);
-        b.setTextSize(11);
+        b.setTextSize(10);
         b.setAllCaps(false);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(color);
@@ -435,9 +483,20 @@ public class ScreenShareService extends Service {
         return b;
     }
 
+    private void refreshOverlayAgentState() {
+        main.post(new Runnable() {
+            @Override public void run() {
+                if (overlayAgentState != null) {
+                    overlayAgentState.setText("Luma Agent • raw tracker " + rawFps + " FPS • OCR 10 Hz • " + LumaAccessibilityService.getAgentStatusStatic());
+                }
+            }
+        });
+    }
+
     private void handleOverlayMessage(final String q) {
         if (looksLikeDeviceCommand(q)) {
             setOverlayStatus("Luma: " + runOrEnableDeviceTask(q));
+            refreshOverlayAgentState();
             return;
         }
         setOverlayStatus("Luma is thinking…");
@@ -456,9 +515,10 @@ public class ScreenShareService extends Service {
 
     private boolean looksLikeDeviceCommand(String q) {
         String s = q == null ? "" : q.toLowerCase(Locale.ROOT);
-        return s.contains("open ") || s.contains("launch ") || s.contains("click ") || s.contains("tap ") ||
-                s.contains("press ") || s.trim().equals("back") || s.trim().equals("home") || s.contains("go back") || s.contains("go home") ||
-                s.contains("לחץ ") || s.contains("תלחץ ") || s.contains("פתח ") || s.contains("חזור");
+        return s.contains("open ") || s.contains("launch ") || s.contains("click ") || s.contains("tap ") || s.contains("press ") ||
+                s.contains("swipe ") || s.contains("scroll ") || s.contains("type ") || s.contains("wait for ") || s.contains("keep clicking ") ||
+                s.contains("agent") || s.contains("automation") || s.trim().equals("back") || s.trim().equals("home") || s.contains("go back") || s.contains("go home") ||
+                s.contains("לחץ ") || s.contains("תלחץ ") || s.contains("פתח ") || s.contains("חזור") || s.contains("גלול ") || s.contains("כתוב ") || s.contains("משימה");
     }
 
     private String runOrEnableDeviceTask(String q) {
@@ -502,6 +562,7 @@ public class ScreenShareService extends Service {
         try { if (imageThread != null) imageThread.quitSafely(); } catch (Throwable ignored) {}
         imageThread = null;
         imageHandler = null;
+        rawFps = 0;
     }
 
     private void stopSharing() {
@@ -510,6 +571,7 @@ public class ScreenShareService extends Service {
         try { if (overlayView != null && windowManager != null) windowManager.removeView(overlayView); } catch (Throwable ignored) {}
         overlayView = null;
         overlayStatus = null;
+        overlayAgentState = null;
         stopCaptureOnly();
         stopForeground(true);
         stopSelf();
