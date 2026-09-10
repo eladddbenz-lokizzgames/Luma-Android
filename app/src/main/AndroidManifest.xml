@@ -1,5 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application android:theme="@style/Theme.Luma" android:label="Luma" android:icon="@drawable/ic_luma" android:roundIcon="@drawable/ic_luma" android:allowBackup="true" android:supportsRtl="true" android:hardwareAccelerated="true" android:usesCleartextTraffic="false">
         <activity android:name=".MainActivity" android:screenOrientation="portrait" android:exported="true" android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -7,5 +12,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name=".ScreenShareService" android:exported="false" android:foregroundServiceType="mediaProjection" android:stopWithTask="false" />
     </application>
 </manifest>
