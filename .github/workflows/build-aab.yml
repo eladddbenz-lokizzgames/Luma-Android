@@ -1,6 +1,8 @@
 name: Build Luma AAB
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -40,17 +42,17 @@ jobs:
             -alias luma-upload \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Luma Upload, OU=Luma, O=Luma, L=Jerusalem, ST=Jerusalem, C=IL"
-          cp app/build/outputs/bundle/release/app-release.aab release-output/Luma-release.aab
+          cp app/build/outputs/bundle/release/app-release.aab release-output/Luma-2.0-release.aab
           jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
             -keystore release-output/luma-upload-key.jks \
             -storepass "$PASS" -keypass "$PASS" \
-            release-output/Luma-release.aab luma-upload
-          jarsigner -verify -verbose -certs release-output/Luma-release.aab
+            release-output/Luma-2.0-release.aab luma-upload
+          jarsigner -verify -verbose -certs release-output/Luma-2.0-release.aab
           printf '%s\n' "alias=luma-upload" "storePassword=$PASS" "keyPassword=$PASS" > release-output/KEY-CREDENTIALS.txt
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
         with:
-          name: Luma-release
+          name: Luma-2.0-release
           path: release-output/
           if-no-files-found: error
