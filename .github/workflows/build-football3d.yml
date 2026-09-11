@@ -1,0 +1,43 @@
+name: Build BZL Football 3D
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'football3d-source.zip'
+      - '.github/workflows/build-football3d.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Unpack game project
+        run: |
+          rm -rf football3d
+          mkdir football3d
+          unzip -q football3d-source.zip -d football3d
+      - name: Build APK and AAB
+        run: |
+          cd football3d
+          gradle clean assembleRelease bundleRelease --stacktrace
+      - name: Prepare artifacts
+        run: |
+          cp football3d/app/build/outputs/apk/release/app-release.apk BZL-Football-3D.apk
+          cp football3d/app/build/outputs/bundle/release/app-release.aab BZL-Football-3D.aab
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BZL-Football-3D-APK
+          path: BZL-Football-3D.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BZL-Football-3D-AAB
+          path: BZL-Football-3D.aab
