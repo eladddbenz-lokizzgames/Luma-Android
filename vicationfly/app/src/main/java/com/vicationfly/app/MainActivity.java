@@ -24,6 +24,7 @@ public class MainActivity extends Activity {
     Vacation editingVacation;
     AutoCompleteTextView fromBox,toBox;
     String fromCode="",toCode="",selectedDate="";
+    int airportSearchSerial=0;
     static final int PICK_IMAGE=42;
 
     int dp(float v){return(int)(v*getResources().getDisplayMetrics().density+.5f);}
@@ -114,52 +115,196 @@ public class MainActivity extends Activity {
     void showTrip(Vacation v){
         base();
         TextView back=tv("‹  Back",18,ORANGE);content.addView(back,new LinearLayout.LayoutParams(-1,dp(46)));back.setOnClickListener(x->showHome());
-        TextView title=tv(v.name,30,DARK);title.setTypeface(null,1);content.addView(title,new LinearLayout.LayoutParams(-1,dp(60)));
-        LinearLayout plate=new LinearLayout(this);plate.setOrientation(LinearLayout.VERTICAL);plate.setPadding(dp(14),dp(14),dp(14),dp(14));plate.setBackground(bg(Color.WHITE,26));
-        TextView fromLabel=tv("FROM",12,Color.GRAY);fromLabel.setTypeface(null,1);plate.addView(fromLabel);
-        fromBox=airportBox("Search airport / city");plate.addView(fromBox,new LinearLayout.LayoutParams(-1,dp(58)));
-        TextView toLabel=tv("TO",12,Color.GRAY);toLabel.setTypeface(null,1);LinearLayout.LayoutParams tl=new LinearLayout.LayoutParams(-1,dp(25));tl.setMargins(0,dp(10),0,0);plate.addView(toLabel,tl);
-        toBox=airportBox("Search airport / city");plate.addView(toBox,new LinearLayout.LayoutParams(-1,dp(58)));
-        LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(0,dp(10),0,0);
-        Button date=button("📅  Choose date");date.setBackground(bg(Color.rgb(255,150,55),18));row.addView(date,new LinearLayout.LayoutParams(0,dp(56),1));
-        Button apply=button("Apply");LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(dp(110),dp(56));ap.setMargins(dp(10),0,0,0);row.addView(apply,ap);plate.addView(row);
-        content.addView(plate,new LinearLayout.LayoutParams(-1,dp(282)));
-        TextView results=tv("Choose FROM, TO and a date to see flights.",16,Color.GRAY);results.setPadding(dp(8),dp(22),dp(8),dp(12));content.addView(results);
+
+        TextView title=tv(v.name,30,DARK);title.setTypeface(null,1);
+        content.addView(title,new LinearLayout.LayoutParams(-1,dp(58)));
+
+        TextView subtitle=tv("Find your perfect flight",15,Color.GRAY);
+        content.addView(subtitle,new LinearLayout.LayoutParams(-1,dp(34)));
+
+        LinearLayout plate=new LinearLayout(this);
+        plate.setOrientation(LinearLayout.VERTICAL);
+        plate.setPadding(dp(18),dp(18),dp(18),dp(18));
+        plate.setBackground(bg(Color.WHITE,30));
+        plate.setElevation(dp(8));
+
+        TextView routeTitle=tv("✈  Where are you flying?",20,DARK);
+        routeTitle.setTypeface(null,1);
+        plate.addView(routeTitle,new LinearLayout.LayoutParams(-1,dp(40)));
+
+        TextView fromLabel=tv("FROM",11,Color.GRAY);fromLabel.setTypeface(null,1);
+        plate.addView(fromLabel,new LinearLayout.LayoutParams(-1,dp(24)));
+        fromBox=airportBox("Airport, city or IATA code");
+        plate.addView(fromBox,new LinearLayout.LayoutParams(-1,dp(58)));
+
+        TextView toLabel=tv("TO",11,Color.GRAY);toLabel.setTypeface(null,1);
+        LinearLayout.LayoutParams tl=new LinearLayout.LayoutParams(-1,dp(24));tl.setMargins(0,dp(12),0,0);plate.addView(toLabel,tl);
+        toBox=airportBox("Airport, city or IATA code");
+        plate.addView(toBox,new LinearLayout.LayoutParams(-1,dp(58)));
+
+        LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(0,dp(16),0,0);
+        Button date=button("📅  Choose date");date.setBackground(bg(Color.rgb(255,150,55),18));
+        row.addView(date,new LinearLayout.LayoutParams(0,dp(58),1));
+        Button apply=button("Search ✈");LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(dp(128),dp(58));ap.setMargins(dp(10),0,0,0);row.addView(apply,ap);
+        plate.addView(row);
+
+        content.addView(plate,new LinearLayout.LayoutParams(-1,dp(350)));
+
+        TextView results=tv("Start typing in FROM or TO. Five matching airports will appear instantly.",15,Color.GRAY);
+        results.setGravity(Gravity.CENTER);
+        results.setPadding(dp(10),dp(22),dp(10),dp(18));
+        content.addView(results,new LinearLayout.LayoutParams(-1,dp(70)));
+
+        final LinearLayout holder=new LinearLayout(this);
+        holder.setOrientation(LinearLayout.VERTICAL);
+        holder.setAlpha(0f);
+        content.addView(holder,new LinearLayout.LayoutParams(-1,-2));
+
         final String[] dateValue={""};
-        date.setOnClickListener(x->{Calendar c=Calendar.getInstance();DatePickerDialog d=new DatePickerDialog(this,(view,y,m,day)->{dateValue[0]=String.format(Locale.US,"%04d-%02d-%02d",y,m+1,day);date.setText("📅  "+dateValue[0]);},c.get(Calendar.YEAR),c.get(Calendar.MONTH),c.get(Calendar.DAY_OF_MONTH));d.show();});
-        apply.setOnClickListener(x->{fromCode=airportCode(fromBox.getText().toString());toCode=airportCode(toBox.getText().toString());selectedDate=dateValue[0];if(fromCode.isEmpty()||toCode.isEmpty()||selectedDate.isEmpty()){Toast.makeText(this,"Choose both airports and a date.",Toast.LENGTH_SHORT).show();return;}loadFlights(results,fromCode,toCode,selectedDate);});
-        setupAirportSearch(fromBox);setupAirportSearch(toBox);
+        final boolean[] compacted={false};
+
+        date.setOnClickListener(x->{
+            Calendar c=Calendar.getInstance();
+            DatePickerDialog d=new DatePickerDialog(this,(view,y,m,day)->{
+                dateValue[0]=String.format(Locale.US,"%04d-%02d-%02d",y,m+1,day);
+                date.setText("📅  "+dateValue[0]);
+                if(!compacted[0]){
+                    compacted[0]=true;
+                    results.setText("Ready — press Search to load available flights.");
+                    plate.animate().scaleX(.96f).scaleY(.68f).translationY(-dp(72)).setDuration(650).setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                    subtitle.animate().alpha(.65f).setDuration(300).start();
+                    holder.animate().alpha(1f).setStartDelay(300).setDuration(500).start();
+                    results.animate().translationY(-dp(38)).setDuration(500).start();
+                }
+            },c.get(Calendar.YEAR),c.get(Calendar.MONTH),c.get(Calendar.DAY_OF_MONTH));
+            d.show();
+        });
+
+        apply.setOnClickListener(x->{
+            fromCode=airportCode(fromBox.getText().toString());
+            toCode=airportCode(toBox.getText().toString());
+            selectedDate=dateValue[0];
+            if(fromCode.isEmpty()||toCode.isEmpty()||selectedDate.isEmpty()){
+                Toast.makeText(this,"Choose FROM, TO and a date.",Toast.LENGTH_SHORT).show();return;
+            }
+            holder.removeAllViews();
+            holder.setAlpha(1f);
+            loadFlights(results,fromCode,toCode,selectedDate,holder);
+        });
+
+        setupAirportSearch(fromBox);
+        setupAirportSearch(toBox);
     }
 
     AutoCompleteTextView airportBox(String hint){
-        AutoCompleteTextView b=new AutoCompleteTextView(this);b.setTextSize(17);b.setHint(hint);b.setSingleLine(true);b.setThreshold(1);b.setPadding(dp(14),0,dp(14),0);b.setBackground(bg(Color.rgb(255,250,245),16));return b;
+        AutoCompleteTextView b=new AutoCompleteTextView(this);
+        b.setTextSize(17);b.setHint(hint);b.setSingleLine(true);b.setThreshold(1);
+        b.setPadding(dp(16),0,dp(16),0);
+        b.setBackground(bg(Color.rgb(255,250,245),18));
+        b.setDropDownBackgroundDrawable(bg(Color.WHITE,18));
+        b.setDropDownVerticalOffset(dp(6));
+        b.setDropDownWidth(-1);
+        return b;
     }
 
     void setupAirportSearch(AutoCompleteTextView box){
-        box.setOnItemClickListener((p,v,pos,id)->{String s=(String)p.getItemAtPosition(pos);box.setText(s);});
+        box.setOnItemClickListener((p,v,pos,id)->{
+            String s=(String)p.getItemAtPosition(pos);
+            box.setText(s);
+            box.setSelection(box.length());
+            box.dismissDropDown();
+        });
         box.addTextChangedListener(new android.text.TextWatcher(){
             public void beforeTextChanged(CharSequence s,int st,int c,int a){}
-            public void onTextChanged(CharSequence s,int st,int before,int count){if(s.length()<1)return;searchAirports(box,s.toString());}
+            public void onTextChanged(CharSequence s,int st,int before,int count){
+                String q=s.toString().trim();
+                if(q.isEmpty()){box.dismissDropDown();return;}
+                searchAirports(box,q);
+            }
             public void afterTextChanged(android.text.Editable e){}
+        });
+        box.setOnFocusChangeListener((v,has)->{
+            if(has && box.length()>0) searchAirports(box,box.getText().toString().trim());
         });
     }
 
     void searchAirports(AutoCompleteTextView box,String q){
-        new Thread(()->{try{
-            URL u=new URL("https://airportsapi.com/api/airports?search="+URLEncoder.encode(q,"UTF-8"));
-            HttpURLConnection c=(HttpURLConnection)u.openConnection();c.setConnectTimeout(5000);c.setReadTimeout(5000);c.setRequestMethod("GET");
-            BufferedReader r=new BufferedReader(new InputStreamReader(c.getInputStream()));StringBuilder s=new StringBuilder();String line;while((line=r.readLine())!=null)s.append(line);c.disconnect();
-            JSONArray a=new JSONObject(s.toString()).optJSONArray("data");ArrayList<String> list=new ArrayList<>();
-            if(a!=null)for(int i=0;i<Math.min(a.length(),8);i++){JSONObject o=a.getJSONObject(i);String iata=o.optString("iata_code");if(iata.isEmpty())iata=o.optString("code");String name=o.optString("name");String city=o.optString("municipality");if(!iata.isEmpty())list.add(iata+" — "+name+(city.isEmpty()?"":" • "+city));}
-            runOnUiThread(()->{box.setAdapter(new ArrayAdapter<String>(this,android.R.layout.simple_dropdown_item_1line,list));box.showDropDown();});
-        }catch(Exception e){runOnUiThread(()->box.dismissDropDown());}}).start();
+        final int serial=++airportSearchSerial;
+        final String query=q.trim();
+        new Thread(()->{
+            try{
+                URL u=new URL("https://api.freeairportdb.com/v1/airports?q="+URLEncoder.encode(query,"UTF-8")+"&limit=100");
+                HttpURLConnection c=(HttpURLConnection)u.openConnection();
+                c.setConnectTimeout(4500);c.setReadTimeout(6500);c.setRequestMethod("GET");
+                c.setRequestProperty("Accept","application/json");
+                int code=c.getResponseCode();
+                InputStream stream=code<400?c.getInputStream():c.getErrorStream();
+                BufferedReader r=new BufferedReader(new InputStreamReader(stream,"UTF-8"));
+                StringBuilder s=new StringBuilder();String line;
+                while((line=r.readLine())!=null)s.append(line);
+                r.close();c.disconnect();
+                if(code>=400)throw new Exception("Airport search HTTP "+code);
+
+                JSONArray a=new JSONObject(s.toString()).optJSONArray("data");
+                ArrayList<String> matches=new ArrayList<>();
+                if(a!=null){
+                    String lower=query.toLowerCase(Locale.ROOT);
+                    for(int i=0;i<a.length();i++){
+                        JSONObject o=a.getJSONObject(i);
+                        String name=o.optString("name","");
+                        String city=o.optString("municipality","");
+                        String iata=o.optString("iata","");
+                        String icao=o.optString("icao","");
+                        String codeId=o.optString("code","");
+                        String hay=(name+" "+city+" "+iata+" "+icao+" "+codeId).toLowerCase(Locale.ROOT);
+                        boolean prefix=name.toLowerCase(Locale.ROOT).startsWith(lower)
+                                ||city.toLowerCase(Locale.ROOT).startsWith(lower)
+                                ||iata.toLowerCase(Locale.ROOT).startsWith(lower)
+                                ||icao.toLowerCase(Locale.ROOT).startsWith(lower)
+                                ||codeId.toLowerCase(Locale.ROOT).startsWith(lower);
+                        if(prefix){
+                            String shown=(iata.isEmpty()?codeId:iata)+" — "+name
+                                    +(city.isEmpty()?"":" • "+city)
+                                    +(o.optString("country_name","").isEmpty()?"":" • "+o.optString("country_name"));
+                            matches.add(shown);
+                        }
+                    }
+                }
+
+                Collections.shuffle(matches);
+                ArrayList<String> five=new ArrayList<>(matches.subList(0,Math.min(5,matches.size())));
+
+                runOnUiThread(()->{
+                    if(serial!=airportSearchSerial || !query.equals(box.getText().toString().trim())) return;
+                    ArrayAdapter<String> adapter=new ArrayAdapter<String>(this,android.R.layout.simple_dropdown_item_1line,five){
+                        @Override public View getView(int position,View convertView,android.view.ViewGroup parent){
+                            TextView t=(TextView)super.getView(position,convertView,parent);
+                            t.setTextSize(15);t.setTextColor(DARK);t.setPadding(dp(16),dp(14),dp(16),dp(14));
+                            t.setBackground(bg(Color.WHITE,14));return t;
+                        }
+                    };
+                    box.setAdapter(adapter);
+                    if(five.isEmpty()){
+                        box.dismissDropDown();
+                    }else{
+                        box.showDropDown();
+                    }
+                });
+            }catch(Exception e){
+                runOnUiThread(()->{if(serial==airportSearchSerial)box.dismissDropDown();});
+            }
+        }).start();
     }
 
-    String airportCode(String s){if(s==null)return"";String x=s.trim();int n=x.indexOf('—');if(n>0)x=x.substring(0,n).trim();return x.length()>=3?x.substring(0,3).toUpperCase(Locale.US):"";}
+    String airportCode(String s){
+        if(s==null)return"";
+        String x=s.trim();
+        int n=x.indexOf('—');if(n>0)x=x.substring(0,n).trim();
+        return x.length()>=3?x.substring(0,3).toUpperCase(Locale.US):"";
+    }
 
-    void loadFlights(TextView status,String from,String to,String date){
+    void loadFlights(TextView status,String from,String to,String date,LinearLayout holder){
         status.setText("Searching cached flight offers…");
-        final LinearLayout holder=new LinearLayout(this);holder.setOrientation(LinearLayout.VERTICAL);content.addView(holder,new LinearLayout.LayoutParams(-1,-2));
         new Thread(()->{try{
             URL u=new URL("https://flight-mcp.com/v1/flights/search/cached");HttpURLConnection c=(HttpURLConnection)u.openConnection();c.setRequestMethod("POST");c.setConnectTimeout(8000);c.setReadTimeout(10000);c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json");
             String body=new JSONObject().put("origin",from).put("destination",to).put("departureDate",date).put("maxResults",10).put("cacheTtlSeconds",604800).toString();
