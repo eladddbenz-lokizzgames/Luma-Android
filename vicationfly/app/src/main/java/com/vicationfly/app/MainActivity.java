@@ -148,7 +148,7 @@ public class MainActivity extends Activity {
         new Thread(()->{try{
             URL u=new URL("https://airportsapi.com/api/airports?search="+URLEncoder.encode(q,"UTF-8"));
             HttpURLConnection c=(HttpURLConnection)u.openConnection();c.setConnectTimeout(5000);c.setReadTimeout(5000);c.setRequestMethod("GET");
-            BufferedReader r=new BufferedReader(new InputStreamReader(c.getInputStream()));StringBuilder s=new StringBuilder();String line;while((line=r.readLine())!=null)s.append(line);r.disconnect();
+            BufferedReader r=new BufferedReader(new InputStreamReader(c.getInputStream()));StringBuilder s=new StringBuilder();String line;while((line=r.readLine())!=null)s.append(line);c.disconnect();
             JSONArray a=new JSONObject(s.toString()).optJSONArray("data");ArrayList<String> list=new ArrayList<>();
             if(a!=null)for(int i=0;i<Math.min(a.length(),8);i++){JSONObject o=a.getJSONObject(i);String iata=o.optString("iata_code");if(iata.isEmpty())iata=o.optString("code");String name=o.optString("name");String city=o.optString("municipality");if(!iata.isEmpty())list.add(iata+" — "+name+(city.isEmpty()?"":" • "+city));}
             runOnUiThread(()->{box.setAdapter(new ArrayAdapter<String>(this,android.R.layout.simple_dropdown_item_1line,list));box.showDropDown();});
